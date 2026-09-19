@@ -25,7 +25,8 @@ Python 3.8 以上即可。脚本本身只有一个第三方依赖。
 cp sync_config.ini.example sync_config.ini
 vi sync_config.ini                    # 改 [source] / [target] 的 host/user/password
 
-# ② 确认库清单（本项目已内置 100 个 AG 库）
+# ② 核对库清单：仓库里带的 100 个 AG 库名是上一批环境留下的，
+#    换环境必须按第 9 节步骤 0 从源实例重新生成，否则全部报「源实例中不存在」
 vi databases.txt
 
 # ③ 先预检，看清楚要动哪些库，这一步不碰目标端
@@ -39,6 +40,9 @@ python mysql_sync.py --yes --log-file sync.log
 按源端真实库名纠正并告警）。**建议每次都先跑一遍。**
 
 不加 `--yes` 时，若目标端存在同名库，脚本会列出会被 DROP 的库并要求输入 `yes` 确认。
+
+上面只是把脚本跑起来。真要搬几十个上百个库，按第 9 节的流程走，搬完务必做第 10 节的核验——
+**报告「完成」只代表脚本没报错，不代表对象齐全**。
 
 ## 3. 同步账号需要哪些权限
 
@@ -72,6 +76,18 @@ GRANT ALL PRIVILEGES ON `AG%`.* TO 'sync_writer'@'10.0.0.%';
 
 不需要 `SUPER`。脚本会主动剥掉视图/触发器/例程/事件 DDL 里的 `DEFINER=...`，让它们落在
 当前执行账号上，因此目标账号不必具备设置任意 DEFINER 的权限。
+
+### 权限给不够会「静默少对象」，而不是报错
+
+脚本的待同步清单全部来自源端 `information_schema`，而 `information_schema` 只显示当前账号
+**有权看到**的对象。所以：
+
+- 源账号只覆盖了部分库 → 其余库在预检就报「源实例中不存在」，会 `exit 1`，这种失败是响的；
+- 源账号缺 `SHOW ROUTINE` → 不是自己定义的存储过程/函数在 `ROUTINES` 里根本查不到，
+  于是一条错误都不报、目标端就是没有这些过程（只有显式读到空定义时才报「读不到定义」）；
+- 源账号缺 `TRIGGER` / `EVENT` → 同理，触发器和事件会被当成「该库没有这类对象」。
+
+这三种情况结束时都打印「成功」。第 10 节的逐类计数比对就是用来兜住它的。
 
 ## 4. 配置文件 `sync_config.ini`
 
@@ -210,6 +226,7 @@ python mysql_sync.py --yes --only AG3105 --table-workers 1
 
 | 报错 | 原因与处理 |
 | --- | --- |
+| `1046 No database selected`（整库建表全失败，只有视图能建上） | 用的是修复前的版本。`SHOW CREATE TABLE` 输出不带库名前缀，脚本必须在建库后 `USE` 选中目标库；拉最新代码即可 |
 | `Access denied for user 'sync_reader'` | 缺权限。逐项核对第 3 节的 GRANT，特别是 `PROCESS` 和 `SHOW ROUTINE` |
 | `源实例中不存在 N 个库` | 清单名字写错，或源端大小写不同（大小写不同只会告警并按源端纠正，不会报缺失） |
 | `MySQL server has gone away` / `Packet too large` | `batch_rows` / `batch_bytes` 调小，或把目标端 `max_allowed_packet` 调大 |
@@ -221,7 +238,123 @@ python mysql_sync.py --yes --only AG3105 --table-workers 1
 | 大库跑一半连接被重置 | 防火墙/负载均衡掐长连接。调小 `workers` 和 `table_workers`，或调大目标端 `max_allowed_packet` 减小批次体积 |
 | 日志中文乱码 | Windows 控制台默认 GBK，脚本已在 `main()` 里切到 UTF-8；若仍乱码，`chcp 65001` 或改用 `--log-file` |
 
-## 9. 自测
+## 9. 正式迁移操作流程（几十上百个库）
+
+### 步骤 0 · 清单和账号先对准
+
+`databases.txt` 必须是**源实例上真实存在**的库名。拿别的环境留下的旧清单直接跑，结果是
+「源实例中不存在 N 个库」然后 `exit 1`，一个字节都不会动。重新生成：
+
+```sql
+SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
+ WHERE SCHEMA_NAME NOT IN ('mysql','information_schema','performance_schema','sys')
+ ORDER BY SCHEMA_NAME;
+```
+
+源账号必须**一个账号覆盖全部待同步库**。"每个库各用自己的单库账号轮一遍"不可取，理由见
+第 3 节的「静默少对象」。
+
+### 步骤 1 · 预检
+
+```bash
+python mysql_sync.py --dry-run
+```
+
+逐字确认两行：`待同步 N 个库` 的 N 要等于你心里的数量；`源实例中不存在` 不允许出现。
+它同时会列出哪些目标端库将被 DROP 重建——这是唯一一处能事前看到破坏面的地方。
+
+### 步骤 2 · 单库金丝雀
+
+```bash
+python mysql_sync.py --yes --only 某个库 --workers 1 --table-workers 1 --log-file canary.log
+```
+
+挑库时要挑**确实带触发器 / 存储过程 / 事件**的。空的或非空的库走的是完全不同的代码路径，
+拿一个只有表的库试跑，等于没测。跑完立刻做第 10 节核验。
+
+### 步骤 3 · 全量
+
+```bash
+nohup python mysql_sync.py --yes --log-file sync-all.log &
+tail -f sync-all.log
+```
+
+**不要把标准输出重定向到 `/dev/null`。** 结尾那张「总耗时 / 成功 / 失败 / 失败明细」汇总表和
+退出码是用 `print()` 打到标准输出的，只有逐表进度走 logging、会写进 `--log-file`。重定向掉
+就等于把唯一一份总体结论丢了，只能回头 grep 日志逐库结果行自己数：
+
+```bash
+grep -c "失败" sync-all.log      # 非 0 就是有库没搬完
+grep "失败" sync-all.log | head
+```
+
+注意 `--log-file` 里每行**只有消息正文、没有 `INFO`/`ERROR` 这样的级别名**（文件 handler 没挂
+formatter），所以按 `ERROR` 去搜是搜不到东西的，要按消息里的中文关键词搜。
+
+### 步骤 4 · 并发怎么定
+
+先算连接预算：`workers × (table_workers + 1) × 2`，源和目标各占一半，必须小于两端
+`max_connections` 和同步账号的 `max_user_connections`。
+
+| 情况 | 配置 | 理由 |
+| --- | --- | --- |
+| 上百个中小库 | `--workers 8 --table-workers 1` | 每库 100+ 张表的建表 DDL 是**单连接串行**执行的，库多时这才是瓶颈，库内并行帮不上忙；`table_workers=1` 还顺带保证了单库跨表同一快照 |
+| 一两个超大库 | `--workers 1 --table-workers 8~16` | 让库内部并行，避免长尾 |
+| 源是生产主库、怕压垮 | `--workers 2 --table-workers 2`，配置里 `batch_rows = 500` | 减小单批体积与源端扫描压力 |
+
+### 步骤 5 · 失败重跑
+
+见第 7 节。重跑某个库是重新 `DROP` 整库再建，不是补差异。
+
+## 10. 同步后的核验清单（必做）
+
+脚本只会报告「我执行的过程中没报错」，它不会知道源端有没有东西是你压根没让它看见的。
+下面这几条才是交付依据。
+
+**① 逐类对象数两端比对**——防静默少对象，最重要的一条：
+
+```sql
+-- 两端各跑一次，结果必须逐行相同（前缀按实际库名改）
+SELECT TABLE_SCHEMA, TABLE_TYPE, COUNT(*) FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA LIKE 'AG%' GROUP BY 1,2 ORDER BY 1;
+SELECT ROUTINE_SCHEMA, ROUTINE_TYPE, COUNT(*) FROM information_schema.ROUTINES
+ WHERE ROUTINE_SCHEMA LIKE 'AG%' GROUP BY 1,2 ORDER BY 1;
+SELECT TRIGGER_SCHEMA, COUNT(*) FROM information_schema.TRIGGERS
+ WHERE TRIGGER_SCHEMA LIKE 'AG%' GROUP BY 1 ORDER BY 1;
+SELECT EVENT_SCHEMA, COUNT(*) FROM information_schema.EVENTS
+ WHERE EVENT_SCHEMA LIKE 'AG%' GROUP BY 1 ORDER BY 1;
+```
+
+关键技巧：源端那一侧**用同步账号跑一遍、再用高权限账号跑一遍**。两个结果不一样，就说明
+同步账号权限给漏了，而差出来的那些对象在目标端就是不存在——脚本不会为此报任何错。
+
+**② 行数。** 要留交付凭证就把配置里 `verify = true` 打开（每表拷完做一次两端 `COUNT(*)`，
+代价是源端多一遍全表扫描，中小库几秒可接受）；或事后对重点表抽样 `SELECT COUNT(*)`。
+
+**③ 时间列不漂移。** 两端会话都先 `SET SESSION time_zone = '+08:00'`（用数字偏移，和脚本
+行为一致），再比 `MIN`/`MAX` 与 `SUM(UNIX_TIMESTAMP(col))`。不设就比，会因两端默认时区不同
+而假报警。
+
+**④ 字符集没被"顺手改掉"。** 脚本原样重放建表语句，源库的 latin1/gbk 表在目标端仍是
+latin1/gbk。想确认：
+
+```sql
+SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA = '库名' AND TABLE_COLLATION NOT LIKE 'utf8mb4%';
+```
+
+**⑤ 视图 DEFINER 变成目标执行账号是预期行为。** 副作用值得知道：源端因为 definer 账号已被
+删除而根本查不动的坏视图，剥掉 DEFINER 落到目标执行账号后**反而能查了**。两端视图结果不一致
+时先想到这条，别当同步 bug 报。
+
+**⑥ 事件搬过去了但不会跑。** 脚本不改服务端全局开关，要事件真跑起来，自己在目标端执行
+`SET PERSIST event_scheduler = ON;`。
+
+**⑦ 本来就不搬的东西**（别在核验时才发现）：数据库账号与库表级授权、`my.cnf` 与服务端参数
+（含 `lower_case_table_names`）、binlog/GTID 位点（拷贝后目标端是全新起点，接不回原复制拓扑）、
+非 `BASE TABLE`/`VIEW` 的对象。
+
+## 11. 自测
 
 没有真实两端环境时，可以用假连接验证 SQL 生成、分批、并行调度与 DDL 顺序：
 
@@ -234,14 +367,14 @@ python selftest.py
 `建库 → 选中库 → 建表 → 建视图 → 触发器 → 存储过程` 的执行顺序，以及建表前必须已 `USE`
 选中目标库（漏了会整库报 1046 No database selected）。有失败时退出码为 1，可直接接进 CI。
 
-## 10. 文件说明
+## 12. 文件说明
 
 | 文件 | 用途 |
 | --- | --- |
 | `mysql_sync.py` | 同步主程序 |
 | `AGENTS.md` | 项目约束与核心不变量，改代码前先看 |
 | `sync_config.ini.example` | 配置模板，复制成 `sync_config.ini` 后填写 |
-| `databases.txt` | 待同步库清单（当前内置 100 个 AG 库） |
+| `databases.txt` | 待同步库清单。仓库里带的是历史环境留下的 100 个 AG 库名，换环境先按第 9 节步骤 0 重新生成 |
 | `selftest.py` | 无凭据自测，不需要连数据库 |
 | `.gitignore` | 已排除 `sync_config.ini`、日志、`__pycache__` |
 | `.gitattributes` | 强制 LF 换行，保证脚本能在 Linux 上直接执行 |
