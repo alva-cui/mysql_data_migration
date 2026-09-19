@@ -1,6 +1,8 @@
 # 含明文密码，只提交 sync_config.ini.example 模板
 sync_config.ini
 
+# 运行日志统一落 logs/（--log-file logs/xxx.log），轮转出来的 .1 .2 也一样不入库
+logs/
 *.log
 __pycache__/
 *.py[cod]
