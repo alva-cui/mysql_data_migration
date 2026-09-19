@@ -1,0 +1,3 @@
+# 脚本常在 Linux 跳板机上直接 ./mysql_sync.py 执行，
+# 带 CRLF 会让 shebang 解析成 "python3\r" 而报 bad interpreter
+* text=auto eol=lf

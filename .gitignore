@@ -1,0 +1,11 @@
+# 含明文密码，只提交 sync_config.ini.example 模板
+sync_config.ini
+
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store

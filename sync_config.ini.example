@@ -1,0 +1,72 @@
+# ============================================================
+# MySQL 整库同步配置。只改这个文件，不用动脚本。
+# 密码可用环境变量覆盖（避免落盘）：
+#   SYNC_SRC_PASSWORD=xxx  SYNC_DST_PASSWORD=yyy  python mysql_sync.py
+# 注意：本文件含明文密码，用 chmod 600 / icacls 收紧权限，别提交进仓库。
+# ============================================================
+
+[source]
+host = 10.0.0.11
+port = 3306
+user = sync_reader
+# pymysql 握手要求密码可 latin-1 编码，含中文会直接报错；这类密码请用上面的环境变量传
+password = CHANGE_ME_SRC
+# 走 socket 连接时取消下行注释，host/port 将被忽略
+# socket = /var/run/mysqld/mysqld.sock
+charset = utf8mb4
+
+[target]
+host = 10.0.0.12
+port = 3306
+user = root
+password = CHANGE_ME_DST
+# socket =
+charset = utf8mb4
+
+[sync]
+# ---- 并发 ----
+# 两层并行：workers 管"同时同步几个库"，table_workers 管"单个库内同时传几张表"。
+# 总并发传输 = workers x table_workers。
+# 峰值连接数 = workers x (table_workers + 1) x 2，源和目标各占一半，
+# 调大前先核对两端的 max_connections 与账号 max_user_connections。
+
+# 同时同步的库数。库少时调小，100 个库建议 4~8
+workers = 4
+
+# 单个库内并行传输的表数，即该库开几条传输通道。
+# 1 = 整库所有表读同一个一致性快照，跨表严格同时，但大库会成为总时长的长尾；
+# >1 = 大库内部并行、明显提速，代价是单库内跨表不再同一快照（各通道快照独立）。
+# 只有 1 个超大库时，把 workers 设 1、table_workers 设 8~16
+table_workers = 4
+
+# ---- 批量 ----
+# 单批 INSERT 的行数上限
+batch_rows = 1000
+
+# 单批 INSERT 的字节上限；实际还会自动压到目标端 max_allowed_packet 的 60%，
+# 超了会报 "MySQL server has gone away"，遇到就调小
+batch_bytes = 4194304
+
+# ---- 策略 ----
+# true = 目标端同名库先 DROP 再整库重建（原有数据不可恢复）
+# false = 不 DROP，目标端已存在该库时建表会报已存在，只适合全新目标端
+drop_existing = true
+
+# 视图/触发器/存储过程与函数/定时事件。关掉对应的项就只同步表和表数据
+include_views = true
+include_triggers = true
+include_routines = true
+include_events = true
+
+# 每张表拷完做一次两端 COUNT(*) 比对。源端会额外全表扫描一次，
+# 千万行大表上明显拖慢，只在需要交付凭证时开
+verify = false
+
+# ---- 会话参数 ----
+# 导入期间目标会话的 sql_mode。留空 = 完全宽松，
+# 避免源库里历史遗留的零日期（'0000-00-00'）被目标严格模式拒掉。
+# 想在导入阶段也保持严格校验，填源的 sql_mode（有失败风险）
+sql_mode =
+
+# 大批量传输时的会话网络超时（秒），对应 net_read_timeout / net_write_timeout
+net_timeout = 3600
