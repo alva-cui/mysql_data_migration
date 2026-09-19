@@ -11,7 +11,7 @@
 python selftest.py
 ```
 
-它用假连接覆盖 SQL 生成、分批、并行调度、DDL 执行顺序、DEFINER 剥离等 59 项断言。
+它用假连接覆盖 SQL 生成、分批、并行调度、DDL 执行顺序、DEFINER 剥离等 60 项断言。
 全绿才提交（失败时退出码为 1）。这个脚本无法验证真实表结构兼容性，涉及线上行为时先拿单个库
 `--only` 试跑。
 
@@ -39,6 +39,10 @@ python selftest.py
   `SQL SECURITY DEFINER` 不含等号，不受影响，必须原样保留。
 - **DDL 顺序固定**：建库 → 建表 → 传数据 → 建视图 → 触发器/存储过程/事件。视图和例程提前
   创建会引用到尚不存在的对象。
+- **建库后必须 `USE` 选中目标库，再执行 `SHOW CREATE` 拿来的 DDL**。`SHOW CREATE TABLE` /
+  `PROCEDURE` 的输出不带库名前缀，会话没选中库就执行会整库报 `1046 No database selected`；
+  而 `SHOW CREATE VIEW` 是带前缀的，所以只有视图能建上——症状最容易看漏。selftest 的假游标
+  不校验默认库，这个坑只有真跑或靠"建表前已 USE 选中目标库"那条断言才兜得住。
 - **`batch_bytes` 实际会再压到目标端 `max_allowed_packet` 的 60%**，不是配置值直通。
   去掉这层折算就会撞上 `MySQL server has gone away`。
 - **`table_workers = 1` 是"单库内跨表同一快照"的唯一保证**，也是所有通道各自事务的根源。

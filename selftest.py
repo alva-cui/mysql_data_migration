@@ -425,6 +425,8 @@ ms.Channel = StubChannel
 
 def kind(sql):
     up = sql.upper()
+    if up.startswith("USE "):
+        return "USE"
     for key in ("DROP DATABASE", "CREATE DATABASE", "CREATE TRIGGER", "CREATE PROCEDURE",
                 "VIEW `V1`", "TABLE `T1`", "TABLE `T2`"):
         if key in up:
@@ -440,11 +442,15 @@ ddl_seq = [c for c in dst_conn.cur.calls if not c.startswith("SET") and not c.st
 
 check("全流程无错误", res.errors, [])
 check(
-    "DDL 执行顺序：建库→建表→建视图→触发器→存储过程",
+    "DDL 执行顺序：建库→选中库→建表→建视图→触发器→存储过程",
     [kind(c) for c in ddl_seq],
-    ["DROP DATABASE", "CREATE DATABASE", "TABLE `T1`", "TABLE `T2`",
+    ["DROP DATABASE", "CREATE DATABASE", "USE", "TABLE `T1`", "TABLE `T2`",
      "VIEW `V1`", "CREATE TRIGGER", "CREATE PROCEDURE"],
 )
+# SHOW CREATE TABLE / PROCEDURE 的输出不带库名前缀，会话没 USE 选中库就执行会报
+# 1046 No database selected，整库 126 张表全部建不出来
+check("建表前已 USE 选中目标库",
+      [c for c in ddl_seq if c.startswith("USE ")], ["USE `AG3139`"])
 check("两张表都被传输", sorted(x[1] for x in Transferred if x[0] == "copy"), ["t1", "t2"])
 check("通道数收敛到 table_workers", len([x for x in Transferred if x[0] == "open"]), 2)
 check(

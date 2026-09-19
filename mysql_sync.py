@@ -447,6 +447,10 @@ class Syncer:
 
             self.create_schema(wcur, dbname, charset, collation)
             ddl.commit()
+            # SHOW CREATE TABLE / PROCEDURE 的输出不带库名前缀，会话没选中库就直接
+            # 执行会报 1046 No database selected
+            wcur.execute(f"USE {q(dbname)}")
+            ddl.commit()
 
             items = []
             for table in tables:
