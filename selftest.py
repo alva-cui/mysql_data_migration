@@ -8,9 +8,12 @@ for _s in (sys.stdout, sys.stderr):
     _s.reconfigure(encoding="utf-8", errors="replace")
 logging.basicConfig(level=logging.CRITICAL)
 fails = []
+total = 0
 
 
 def check(name, got, want):
+    global total
+    total += 1
     if got != want:
         fails.append(f"{name}\n     得到 {got!r}\n     期望 {want!r}")
 
@@ -291,15 +294,6 @@ s2.create_schema(c, "AG3139", "utf8mb4", None)
 check("drop_existing=false 不 DROP", [x[0] for x in c.calls],
       ["CREATE DATABASE IF NOT EXISTS `AG3139` DEFAULT CHARACTER SET utf8mb4"])
 
-print("=" * 60)
-if fails:
-    print(f"{len(fails)} 项失败：")
-    for f in fails:
-        print("  ✗", f)
-else:
-    print("全部通过")
-print("=" * 60)
-
 # ---- sync_database 全流程编排（假连接） ----
 import re as _re
 
@@ -476,7 +470,8 @@ check("建表失败的表不参与传输", [x[1] for x in Transferred if x[0] ==
 check("只传输成功的表参与计数", res.tables, 1)
 
 print("=" * 60)
-print(f"{len(fails)} 项失败" if fails else "全部通过（含全流程编排）")
+print(f"{total} 项断言全部通过" if not fails else f"{total} 项断言，{len(fails)} 项失败")
 for f in fails:
     print("  x", f)
 print("=" * 60)
+sys.exit(1 if fails else 0)
